@@ -1,0 +1,8 @@
+pillow>=10.0.0
+watchdog>=3.0.0
+selenium>=4.0.0
+webdriver-manager>=3.0.0
+python-telegram-bot>=20.0
+apscheduler>=3.10.0
+pandas
+numpy
