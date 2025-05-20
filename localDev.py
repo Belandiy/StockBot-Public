@@ -200,37 +200,56 @@ async def show_unique_users(update: Update, context: CallbackContext):
     await q.answer()
 
     try:
-        with open('unique_users.csv', 'r', encoding='utf-8') as f:
-            reader = csv.reader(f)
-            next(reader)  # Пропуск заголовка
+        # Парсим номер страницы из callback_data или устанавливаем 0
+        page = int(q.data.split('_')[-1]) if '_' in q.data else 0
+        per_page = 15
 
-            users = []
-            for row in reader:
-                users.append(f"{row[0]} | ID: {row[1]} | @{row[2] or 'нет'}")
+        # Загрузка данных из CSV вместо глобальной переменной
+        users_list = []
+        if os.path.exists('unique_users.csv'):
+            with open('unique_users.csv', 'r', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                next(reader)  # Пропускаем заголовок
+                for row in reader:
+                    if len(row) >= 3:
+                        users_list.append((row[1], row[0], row[2]))
 
-            if not users:
-                msg = "🚫 Нет зарегистрированных пользователей"
-            else:
-                msg = "👤 Уникальные пользователи:\n\n" + "\n".join(users[:50])  # Первые 50 записей
+        # Сортируем по дате регистрации (новые первые)
+        users_list.sort(key=lambda x: x[1], reverse=True)
 
-                if len(users) > 50:
-                    msg += "\n\n...и еще {} пользователей".format(len(users) - 50)
+        # Пагинация
+        total_users = len(users_list)
+        total_pages = max(1, (total_users + per_page - 1) // per_page)
+        page = max(0, min(page, total_pages - 1))
+        start = page * per_page
+        end = start + per_page
 
-    except FileNotFoundError:
-        msg = "❌ Файл с пользователями не найден"
+        # Формируем сообщение
+        msg = f"👥 Уникальные пользователи (Страница {page + 1}/{total_pages}):\n\n"
+        for i, (user_id, reg_date, username) in enumerate(users_list[start:end], start + 1):
+            msg += f"{i}. {reg_date}\nID: {user_id}\n@{username or 'нет'}\n\n"
+
+        # Создаем кнопки пагинации
+        buttons = []
+        if total_pages > 1:
+            pagination_buttons = []
+            if page > 0:
+                pagination_buttons.append(InlineKeyboardButton("◀️ Назад", callback_data=f"users_page_{page - 1}"))
+            if page < total_pages - 1:
+                pagination_buttons.append(InlineKeyboardButton("Вперед ▶️", callback_data=f"users_page_{page + 1}"))
+            buttons.append(pagination_buttons)
+
+        buttons.append([InlineKeyboardButton("🔙 В меню", callback_data="dev_menu")])
+
+        await q.edit_message_text(
+            text=msg,
+            reply_markup=InlineKeyboardMarkup(buttons),
+            parse_mode="HTML"
+        )
+
     except Exception as e:
-        msg = f"⚠️ Ошибка: {str(e)}"
-        logging.error(f"Error in show_unique_users: {e}")
-
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔙 Назад", callback_data="dev_menu")]
-    ])
-
-    await q.edit_message_text(
-        text=msg,
-        reply_markup=kb,
-        parse_mode="HTML"
-    )
+        logging.error(f"Error in show_unique_users: {e}", exc_info=True)
+        await q.edit_message_text("⚠️ Произошла ошибка при загрузке списка")
 
 async def dev_analyze(update: Update, context: CallbackContext):
     q = update.callback_query
@@ -269,11 +288,11 @@ async def show_active_trackings(update: Update, context: CallbackContext):
                 tracking_type = parts[1]
                 ticker = parts[2]
 
-                if tracking_type == "follow_stock":
+                if tracking_type == "follow":
                     threshold = parts[3]
                     interval = parts[4]
                     tracker_info = f"👤 {chat_id} | {ticker} | Порог: {threshold}% каждые {interval} мин"
-                elif tracking_type == "set_stock":
+                elif tracking_type == "regular":
                     interval = parts[3]
                     tracker_info = f"👤 {chat_id} | {ticker} | Регулярные: каждые {interval} мин"
                 else:
@@ -329,7 +348,7 @@ async def show_jobs(update: Update, context: CallbackContext):
     for job in context.application.job_queue.jobs():
         # Определяем тип задачи
         job_type = "Неизвестный тип"
-        if "send_price_" in job.name:
+        if "regular_" in job.name:
             job_type = "📅 Регулярное обновление"
         elif "follow" in job.name:
             job_type = "🚨 Проверка порога"

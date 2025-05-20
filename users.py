@@ -1,5 +1,6 @@
 #---загрузка инфы о пользователях
 import csv
+import logging
 import os
 from datetime import datetime, timedelta
 from functools import wraps
@@ -26,14 +27,28 @@ from storage import unique_users, save_user_history
 
 def load_existing_users():
     """Загрузка существующих пользователей при запуске"""
+    '''unique_users.clear()
     try:
         with open('unique_users.csv', 'r', encoding='utf-8') as f:
             reader = csv.reader(f)
-            next(reader)  # Пропускаем заголовок
+            try:
+                next(reader)  # Пропускаем заголовок
+            except StopIteration:
+                return
             for row in reader:
                 unique_users.add(int(row[1]))
     except FileNotFoundError:
-        pass
+        pass'''
+    try:
+        with open('unique_users.csv', 'r', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            next(reader)  # Пропуск заголовка
+            for row in reader:
+                if len(row) >= 3:
+                    user_id = row[1]
+                    unique_users[user_id] = (row[0], row[2])
+    except FileNotFoundError:
+        logging.info("Файл unique_users.csv не найден, будет создан новый")
 
 async def log_user_info(update: Update):
     user = update.effective_user
@@ -57,24 +72,33 @@ async def log_unique_users(update: Update):
     uid = user.id
     uname = user.username or 'не указан'
 
-    if uid not in unique_users:
-        # Добавляем в словарь
+    # Загружаем актуальные данные из файла
+    existing_users = set()
+    if os.path.exists('unique_users.csv'):
+        with open('unique_users.csv', 'r', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            '''next(reader)  # Пропускаем заголовок'''
+            try:
+                next(reader)  # Пропускаем заголовок
+            except StopIteration:
+                pass
+            else:
+                for row in reader:
+                    if row:  # Проверка на пустые строки
+                        existing_users.add(int(row[1]))
+
+    # Если пользователь новый
+    if uid not in existing_users:
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        # Обновляем память и файл
         unique_users[uid] = (now, uname)
 
-        # Режим записи: 'a' (дописать) если файл существует, 'w' (создать) если нет
-        file_exists = os.path.isfile('unique_users.csv')
-        mode = 'a' if file_exists else 'w'
-
-        # Перезаписываем файл, чтобы в нём были только уникальные записи
-        with open('unique_users.csv', mode, newline='', encoding='utf-8') as f:
+        # Режим дописывания (добавляем только новые записи)
+        with open('unique_users.csv', 'a', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
-
-            # Записываем заголовок только при создании нового файла
-            if not file_exists:
+            if f.tell() == 0:
                 writer.writerow(['Дата регистрации', 'User ID', 'Username'])
-
-            # Записываем данные текущего пользователя
             writer.writerow([now, uid, uname])
 
 #---логирование всех вызовов

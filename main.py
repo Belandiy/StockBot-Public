@@ -39,7 +39,7 @@ from telegram.ext import (
 import csv
 
 from config import (
-    price_history, active_trackings, timeframe_settings,
+    TOKEN, FEEDBACK_URL, DEVELOPER_KEY, DEVELOPERS_FILE, price_history, timeframe_settings,
     user_history, unique_users, valid_tickers
 )
 from storage import (
@@ -66,34 +66,9 @@ from screenshot import capture_chart_screenshot
 ssl._create_default_https_context = ssl._create_unverified_context
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# Bot token
-TOKEN = "7956229366:AAEZ5rJbZo5O5bJPxLGh3oB0PDlgRgEhtLg"
-
-#режим разработчика
-DEVELOPER_KEY = "111"  # Замените на реальный ключ
-DEVELOPERS_FILE = "developers.csv"
-
-FEEDBACK_URL = "https://docs.google.com/forms/d/e/1FAIpQLSeiqCu8jqbCxcoAidfPe4fa35AW1JzjbY0JJP4KqOQaLl5gWA/viewform?usp=header"  #обратная связь
 
 
-
-'''# Глобальные структуры
-price_history = cn.price_history
-active_trackings = cn.active_trackings
-timeframe_settings = cn.timeframe_settings
-user_history = cn.user_history
-unique_users = cn.unique_users  # mapping user_id -> (registration_date, username)
-valid_tickers = cn.valid_tickers'''
-
-# Файлы тикеров
-TICKERS_RU_FILE = "tickers-RU.txt"
-TICKERS_USA_FILE = "tickers-USA.txt"
-TICKERS_CRYPTO_FILE = "tickers-crypto.txt"
-TICKERS_ETF = "tickers_ETF.txt"
-TICKERS_INDEXES = "tickers_indexes.txt"
-
-
-# Conversation states
+#состояния
 (
     MAIN_MENU, REGULAR_SET_TICKER, REGULAR_SET_INTERVAL,
     THRESHOLD_SET_TICKER, THRESHOLD_SET_PERCENT, MANUAL_THRESHOLD_INPUT_PERCENT, THRESHOLD_SET_INTERVAL,
@@ -104,29 +79,6 @@ TICKERS_INDEXES = "tickers_indexes.txt"
 ) = range(18)
 
 
-# Скриншот графика
-'''async def capture_chart_screenshot(ticker: str, chat_id: int) -> BytesIO | None:
-    tf = timeframe_settings.get(chat_id, "1")
-    opts = Options()
-    opts.add_argument("--headless=new")
-    opts.add_argument("--window-size=1920,1080")
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=opts)
-    try:
-        driver.get(f"https://www.tradingview.com/chart/?symbol={ticker}&interval={tf}")
-        WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.CSS_SELECTOR, "div.chart-container")))
-        await asyncio.sleep(3)
-        chart = driver.find_element(By.CSS_SELECTOR, "div.chart-container")
-        png = chart.screenshot_as_png
-        buf = BytesIO()
-        Image.open(BytesIO(png)).save(buf, format="PNG")
-        buf.seek(0)
-        return buf
-    except Exception as e:
-        logging.error(f"Screenshot error: {e}")
-        return None
-    finally:
-        driver.quit()'''
-
 
 #подгрузка новых тикеров, если они есть
 observer = Observer()
@@ -136,13 +88,14 @@ observer.start()
 
 
 
-
-
-
-
-# Парсер цены
+#парсинг цены
 def sync_get_stock_price(ticker: str) -> float:
-    opts = Options(); opts.add_argument("--headless=new")
+    opts = Options()
+    opts.add_argument("--headless=new")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+
     drv = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=opts)
     try:
         drv.get(f"https://www.tradingview.com/symbols/{ticker}/")
@@ -160,7 +113,7 @@ def sync_get_stock_price(ticker: str) -> float:
         return None
     finally:
         drv.quit()
-        time.sleep(random.uniform(2,5))
+        time.sleep(random.uniform(1, 3))
 
 async def fetch_fresh_price(ticker: str) -> float:
     loop = asyncio.get_event_loop()
@@ -189,33 +142,64 @@ async def get_stock_price(ticker: str) -> float:
 
 # Регистрация задач из storage.load_trackings
 def start_job(application, chat_id, ticker, job_type, interval, threshold=None):
+    new_job_name = ""
+    if job_type == "regular":
+        new_job_name = f"regular_{chat_id}_{ticker}_{interval}"
+
+        if chat_id not in active_trackings:
+            active_trackings[chat_id] = {}
+        if ticker not in active_trackings:
+            active_trackings[chat_id][ticker] = {}
+        if "regular" not in active_trackings[chat_id][ticker]:
+            active_trackings[chat_id][ticker]["regular"] = {}
+
+        interval_key =str(interval)
+        active_trackings[chat_id][ticker]["regular"][interval_key] = {"interval": interval}
+
+    else:
+        new_job_name = f"follow_{chat_id}_{ticker}_{threshold}_{interval}"
+
+        if chat_id not in active_trackings:
+            active_trackings[chat_id] = {}
+        if ticker not in active_trackings:
+            active_trackings[chat_id][ticker] = {}
+        if "follow" not in active_trackings[chat_id][ticker]:
+            active_trackings[chat_id][ticker]["follow"] = {}
+
+        follow_key = f"{threshold}_{interval}"
+        active_trackings[chat_id][ticker]["follow"][follow_key] = {
+            "threshold": threshold,
+            "interval": interval
+        }
+
+    logging.info(f"Проверяем наличие задачи {new_job_name}")
+    existing_jobs = application.job_queue.get_jobs_by_name(new_job_name)
+    for job in existing_jobs:
+        job.schedule_removal()
+        logging.info(f"Удалена существующая задача {new_job_name}")
+
     if job_type == "regular":
         application.job_queue.run_repeating(
-            send_price_update, interval*60,
-            data={"chat_id":chat_id, "ticker":ticker, "interval":interval},
-            name=f"send_price_{chat_id}_{ticker}"
+            send_price_update,
+            interval * 60,
+            data={"chat_id": chat_id, "ticker": ticker, "interval": interval},
+            name=new_job_name
         )
-        active_trackings.setdefault(chat_id, {})[ticker] = {"regular":{"interval":interval}}
+
     else:
         application.job_queue.run_repeating(
-            check_price_changes, interval*60,
-            data={"chat_id":chat_id, "ticker":ticker, "threshold":threshold, "interval":interval},
-            name=f"follow_{chat_id}_{ticker}"
+            check_price_changes,
+            interval * 60,
+            data={"chat_id": chat_id, "ticker": ticker, "threshold": threshold, "interval": interval},
+            name=new_job_name
         )
-        active_trackings.setdefault(chat_id, {})[ticker] = {"threshold":{"threshold":threshold, "interval":interval}}
+
+    save_tracking(chat_id, job_type, ticker, *([interval] if job_type == "regular" else [threshold, interval]))
+    logging.info(f"Сохранено отслеживание {job_type} для {ticker}, job_name={new_job_name}")
+
 
 # ————————————— Обработчики —————————————
 
-'''async def start(update: Update, context: CallbackContext):
-    kb = [
-        [InlineKeyboardButton("📅 Регулярные уведомления", callback_data="reg_notif")],
-        [InlineKeyboardButton("🚨 Отслеживание изменений", callback_data="threshold_notif")],
-        [InlineKeyboardButton("🗑 Удалить отслеживание", callback_data="delete_menu")],
-        [InlineKeyboardButton("⏱ Настройка таймфрейма", callback_data="set_timeframe")],
-        [InlineKeyboardButton("📋 Активные отслеживания", callback_data="list_trackings")],
-    ]
-    await update.message.reply_text("📊 Главное меню:", reply_markup=InlineKeyboardMarkup(kb))
-    return MAIN_MENU'''
 @log_function('main_menu')
 async def start(update: Update, context: CallbackContext):
     await log_user_info(update)
@@ -360,10 +344,10 @@ async def regular_confirm(update: Update, context: CallbackContext):
     context.application.job_queue.run_repeating(
         send_price_update, interval*60,
         data={"chat_id":chat_id,"ticker":ticker,"interval":interval},
-        name=f"send_price_{chat_id}_{ticker}"
+        name=f"regular_{chat_id}_{ticker}"
     )
-    active_trackings.setdefault(chat_id, {})[ticker] = {"regular":{"interval":interval}}
-    save_tracking(chat_id, "set_stock", ticker, interval)
+    #active_trackings.setdefault(chat_id, {})[ticker] = {"regular":{"interval":interval}}
+    save_tracking(chat_id, "regular", ticker, interval)
     await q.edit_message_text(f"✅ Регулярные уведомления для {ticker} каждые {interval} мин активированы!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В меню", callback_data="main_menu")]]))
     return ConversationHandler.END
 
@@ -485,8 +469,8 @@ async def threshold_confirm(update: Update, context: CallbackContext):
         data={"chat_id":chat_id,"ticker":ticker,"threshold":threshold,"interval":interval},
         name=f"follow_{chat_id}_{ticker}"
     )
-    active_trackings.setdefault(chat_id, {})[ticker] = {"threshold":{"threshold":threshold,"interval":interval}}
-    save_tracking(chat_id, "follow_stock", ticker, threshold, interval)
+    #active_trackings.setdefault(chat_id, {})[ticker] = {"threshold":{"threshold":threshold,"interval":interval}}
+    save_tracking(chat_id, "follow", ticker, threshold, interval)
     #await q.edit_message_text(f"✅ Отслеживание {ticker}: порог {threshold}% каждые {interval} мин!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("В меню", callback_data="main_menu")]]))
     # Добавляем кнопку с явным указанием main_menu
     menu_button = [[InlineKeyboardButton("В меню", callback_data="main_menu")]]
@@ -520,18 +504,18 @@ async def delete_regular_list(update: Update, context: CallbackContext):
                 parts = line.strip().split("-")
                 if len(parts) < 4 or int(parts[0]) != chat_id:
                     continue
-                if parts[1] == "set_stock":
+                if parts[1] == "regular":
                     ticker = parts[2]
                     interval = parts[3]
                     buttons.append([InlineKeyboardButton(
                         f"❌ {ticker} ({interval} мин)",
-                        callback_data=f"delreg_{ticker}"
+                        callback_data=f"delreg_{ticker}-{interval}"
                     )])
 
-    for t,d in active_trackings.get(chat_id,{}).items():
+    '''for t,d in active_trackings.get(chat_id,{}).items():     чтение работ из active_trackings
         if "regular" in d:
             iv = d["regular"]["interval"]
-            buttons.append([InlineKeyboardButton(f"❌ {t} ({iv} мин)", callback_data=f"delreg_{t}")])
+            buttons.append([InlineKeyboardButton(f"❌ {t} ({iv} мин)", callback_data=f"delreg_{t}")])'''
     if not buttons:
         await q.edit_message_text(
             text = "🚫 У вас нет активных регулярных уведомлений",
@@ -554,13 +538,103 @@ async def delete_regular_list(update: Update, context: CallbackContext):
 
 @log_function('delete_regular_confirm')
 async def delete_regular_confirm(update: Update, context: CallbackContext):
-    q = update.callback_query; await q.answer()
-    ticker = q.data.split("_")[-1]; chat_id=q.message.chat.id
-    remove_tracking(chat_id, "set_stock", ticker)
-    for job in context.application.job_queue.get_jobs_by_name(f"set_{chat_id}_{ticker}"):
-        job.schedule_removal()
-    active_trackings[chat_id].pop(ticker, None)
-    await q.answer(f"✅ {ticker} удалён")
+    q = update.callback_query
+    await q.answer()
+
+    # Парсим callback_data
+    full_callback_data = q.data
+    logging.info(f"Получен callback: {full_callback_data}")
+
+    try:
+        _, ticker_interval = q.data.split("_", 1)
+        ticker_parts = ticker_interval.split("-")
+
+        if len(ticker_parts) == 1:  # Старый формат callback_data без интервала
+            ticker = ticker_parts[0]
+            # Найдем все регулярные отслеживания для этого тикера
+            chat_id = q.message.chat.id
+
+            # Проверяем, есть ли этот тикер в отслеживаниях
+            if chat_id not in active_trackings or ticker not in active_trackings.get(chat_id, {}):
+                # Проверим файл напрямую
+                found_params = []
+                if os.path.exists(TRACKING_FILE):
+                    with open(TRACKING_FILE, "r", encoding="utf-8") as f:
+                        for line in f:
+                            parts = line.strip().split("-")
+                            if len(parts) >= 4 and int(parts[0]) == chat_id and parts[1] == "regular" and parts[
+                                2] == ticker:
+                                found_params.append(parts[3])
+
+                if found_params:
+                    # Если нашли в файле, удаляем все регулярные отслеживания для этого тикера
+                    for interval in found_params:
+                        remove_tracking(chat_id, "regular", ticker, interval)
+
+                        # Удаляем задачу из очереди
+                        job_name = f"regular_{chat_id}_{ticker}_{interval}"
+                        try:
+                            jobs = context.application.job_queue.get_jobs_by_name(job_name)
+                            for job in jobs:
+                                job.schedule_removal()
+                                logging.info(f"Удалена задача {job_name}")
+                        except Exception as e:
+                            logging.error(f"Ошибка при удалении задачи {job_name}: {e}")
+
+                    await q.answer(f"✅ {ticker} удалён из регулярных уведомлений")
+                else:
+                    await q.answer(f"❌ Отслеживание {ticker} не найдено или уже удалено")
+
+                return await delete_regular_list(update, context)
+            else:
+                # Получаем интервал из active_trackings
+                try:
+                    interval = active_trackings[chat_id][ticker]["regular"]["interval"]
+                except KeyError:
+                    await q.answer(f"❌ Не удалось определить параметры отслеживания для {ticker}")
+                    return await delete_regular_list(update, context)
+        else:  # Новый формат callback_data с интервалом
+            ticker, interval = ticker_parts
+            chat_id = q.message.chat.id
+
+        # Удаляем из файла и из активных отслеживаний
+        remove_tracking(chat_id, "regular", ticker, interval)
+
+        # Удаляем задачу из очереди
+        logging.info(f"Попытка удалить задачи для {chat_id}-{ticker}")
+
+        # Список всех активных задач для диагностики
+        all_jobs = context.application.job_queue.jobs()
+        job_names = [job.name for job in all_jobs]
+        logging.info(f"Текущие задачи: {job_names}")
+
+        # Проверяем различные форматы имен задач
+        job_names_to_check = [
+            f"regular_{chat_id}_{ticker}_{interval}",  # Новый формат с интервалом
+            f"regular_{chat_id}_{ticker}"  # Старый формат без интервала
+        ]
+
+        for job_name in job_names_to_check:
+            logging.info(f"Проверяем задачу: {job_name}")
+            try:
+                jobs = context.application.job_queue.get_jobs_by_name(job_name)
+                if jobs:
+                    for job in jobs:
+                        job.schedule_removal()
+                        logging.info(f"Удалена задача {job_name}")
+                else:
+                    logging.info(f"Задача {job_name} не найдена в очереди")
+            except Exception as e:
+                logging.error(f"Ошибка при удалении задачи {job_name}: {e}")
+
+        await q.answer(f"✅ {ticker} удалён из регулярных уведомлений")
+        logging.info(f"Удален regular-{chat_id}-{ticker}-{interval}")
+        logging.info(f"active_trackings после удаления: {active_trackings}")
+
+    except Exception as e:
+        logging.error(f"Ошибка при обработке callback {full_callback_data}: {e}")
+        await q.answer("❌ Произошла ошибка при удалении отслеживания")
+
     return await delete_regular_list(update, context)
 
 @log_function('delete_threshold_list')
@@ -568,10 +642,26 @@ async def delete_threshold_list(update: Update, context: CallbackContext):
     q = update.callback_query; await q.answer()
     chat_id = q.message.chat.id
     buttons = []
-    for t,d in active_trackings.get(chat_id,{}).items():
+    '''for t,d in active_trackings.get(chat_id,{}).items():
         if "threshold" in d:
             th=d["threshold"]
-            buttons.append([InlineKeyboardButton(f"❌ {t} ({th['threshold']}%/{th['interval']} мин)", callback_data=f"delthr_{t}")])
+            buttons.append([InlineKeyboardButton(f"❌ {t} ({th['threshold']}%/{th['interval']} мин)", callback_data=f"delthr_{t}")])'''
+    # Читаем данные напрямую из файла
+    if os.path.exists(TRACKING_FILE):
+        with open(TRACKING_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.strip().split("-")
+                if len(parts) < 4 or int(parts[0]) != chat_id:
+                    continue
+                if parts[1] == "follow":
+                    ticker = parts[2]
+                    threshold = parts[3]
+                    interval = parts[4]
+                    buttons.append([InlineKeyboardButton(
+                        f"❌ {ticker} ({threshold}% {interval} мин)",
+                        callback_data=f"delthr_{ticker}-{threshold}-{interval}"
+                    )])
+
     if not buttons:
         await q.edit_message_text(
             text = "🚫 У вас нет активных отслеживаний изменений",
@@ -586,29 +676,108 @@ async def delete_threshold_list(update: Update, context: CallbackContext):
 
 @log_function('delete_threshold_confirm')
 async def delete_threshold_confirm(update: Update, context: CallbackContext):
-    q = update.callback_query; await q.answer()
-    ticker = q.data.split("_")[-1]; chat_id=q.message.chat.id
-    remove_tracking(chat_id, "follow_stock", ticker)
-    for job in context.application.job_queue.get_jobs_by_name(f"follow_{chat_id}_{ticker}"):
-        job.schedule_removal()
-    active_trackings[chat_id].pop(ticker, None)
-    await q.answer(f"✅ {ticker} удалён")
+    q = update.callback_query
+    await q.answer()
+
+    # Парсим callback_data
+    full_callback_data = q.data
+    logging.info(f"Получен callback: {full_callback_data}")
+
+    try:
+        _, ticker_threshold_interval = q.data.split("_", 1)
+        ticker_parts = ticker_threshold_interval.split("-")
+
+        if len(ticker_parts) == 1:  # Старый формат callback_data без порога и интервала
+            ticker = ticker_parts[0]
+            chat_id = q.message.chat.id
+
+            # Проверяем, есть ли этот тикер в отслеживаниях
+            if chat_id not in active_trackings or ticker not in active_trackings.get(chat_id, {}):
+                # Проверим файл напрямую
+                found_params = []
+                if os.path.exists(TRACKING_FILE):
+                    with open(TRACKING_FILE, "r", encoding="utf-8") as f:
+                        for line in f:
+                            parts = line.strip().split("-")
+                            if len(parts) >= 5 and int(parts[0]) == chat_id and parts[1] == "follow" and parts[
+                                2] == ticker:
+                                found_params.append((parts[3], parts[4]))
+
+                if found_params:
+                    # Если нашли в файле, удаляем все пороговые отслеживания для этого тикера
+                    for threshold, interval in found_params:
+                        remove_tracking(chat_id, "follow", ticker, threshold, interval)
+
+                        # Удаляем задачу из очереди
+                        job_name = f"follow_{chat_id}_{ticker}_{threshold}_{interval}"
+                        try:
+                            jobs = context.application.job_queue.get_jobs_by_name(job_name)
+                            for job in jobs:
+                                job.schedule_removal()
+                                logging.info(f"Удалена задача {job_name}")
+                        except Exception as e:
+                            logging.error(f"Ошибка при удалении задачи {job_name}: {e}")
+
+                    await q.answer(f"✅ {ticker} удалён из отслеживаний по порогу")
+                else:
+                    await q.answer(f"❌ Отслеживание {ticker} не найдено или уже удалено")
+
+                return await delete_threshold_list(update, context)
+            else:
+                # Получаем параметры из active_trackings
+                try:
+                    threshold = active_trackings[chat_id][ticker]["follow"]["threshold"]
+                    interval = active_trackings[chat_id][ticker]["follow"]["interval"]
+                except KeyError:
+                    await q.answer(f"❌ Не удалось определить параметры отслеживания для {ticker}")
+                    return await delete_threshold_list(update, context)
+        else:  # Новый формат callback_data с порогом и интервалом
+            ticker, threshold, interval = ticker_parts
+            chat_id = q.message.chat.id
+
+        # Удаляем задачу из очереди
+        logging.info(f"Попытка удалить задачи для {chat_id}-{ticker}")
+
+        # Список всех активных задач для диагностики
+        all_jobs = context.application.job_queue.jobs()
+        job_names = [job.name for job in all_jobs]
+        logging.info(f"Текущие задачи: {job_names}")
+
+        # Проверяем различные форматы имен задач
+        job_names_to_check = [
+            f"follow_{chat_id}_{ticker}_{threshold}_{interval}",  # Новый формат с порогом и интервалом
+            f"follow_{chat_id}_{ticker}"  # Старый формат без порога и интервала
+        ]
+
+        for job_name in job_names_to_check:
+            logging.info(f"Проверяем задачу: {job_name}")
+            try:
+                jobs = context.application.job_queue.get_jobs_by_name(job_name)
+                if jobs:
+                    for job in jobs:
+                        job.schedule_removal()
+                        logging.info(f"Удалена задача {job_name}")
+                else:
+                    logging.info(f"Задача {job_name} не найдена в очереди")
+            except Exception as e:
+                logging.error(f"Ошибка при удалении задачи {job_name}: {e}")
+
+        # Удаляем из файла и из активных отслеживаний
+        remove_tracking(chat_id, "follow", ticker, threshold, interval)
+
+        await q.answer(f"✅ {ticker} удалён из отслеживаний по порогу")
+        logging.info(f"Удален follow-{chat_id}-{ticker}-{threshold}-{interval}")
+        logging.info(f"active_trackings после удаления: {active_trackings}")
+
+    except Exception as e:
+        logging.error(f"Ошибка при обработке callback {full_callback_data}: {e}")
+        await q.answer("❌ Произошла ошибка при удалении отслеживания")
+
     return await delete_threshold_list(update, context)
 
 @log_function('list_trackings')
 async def list_trackings(update: Update, context: CallbackContext):
-    '''q = update.callback_query; await q.answer()
-    chat_id = q.message.chat.id
-    regs=[]; ths=[]
-    for t,d in active_trackings.get(chat_id,{}).items():
-        if "regular" in d: regs.append(f"• {t} — каждые {d['regular']['interval']} мин")
-        if "threshold" in d: ths.append(f"• {t} — {d['threshold']['threshold']}% каждые {d['threshold']['interval']} мин")
-    msg=["📋 Активные:"]
-    if regs: msg+=["\n📅 Регулярные:"]+regs
-    if ths: msg+=["\n🚨 Порог:"]+ths
-    kb=[[InlineKeyboardButton("« Назад", callback_data="main_menu")]]
-    await q.edit_message_text("\n".join(msg) if regs or ths else "🚫 Нет активных", reply_markup=InlineKeyboardMarkup(kb))'''
-    q = update.callback_query;
+    q = update.callback_query
     await q.answer()
     chat_id = q.message.chat.id
     regs = []
@@ -622,11 +791,11 @@ async def list_trackings(update: Update, context: CallbackContext):
                 if len(parts) < 4 or int(parts[0]) != chat_id:
                     continue
 
-                if parts[1] == "set_stock":
+                if parts[1] == "regular":
                     ticker = parts[2]
                     interval = parts[3]
                     regs.append(f"• {ticker} — каждые {interval} мин")
-                elif parts[1] == "follow_stock":
+                elif parts[1] == "follow":
                     ticker = parts[2]
                     threshold = parts[3]
                     interval = parts[4]
@@ -651,47 +820,62 @@ async def unknown_command(update: Update, context: CallbackContext):
 
 # Периодические задачи
 async def send_price_update(context: CallbackContext):
-    job = context.job; d=job.data
-    chat_id,ticker,interval = d["chat_id"],d["ticker"],d["interval"]
+    job = context.job
+    d = job.data
+    chat_id, ticker, interval = d["chat_id"], d["ticker"], d["interval"]
     price = await get_stock_price(ticker)
     if price is None: return
-    key=(chat_id,ticker)
-    lst=price_history.setdefault(key,[]); now=datetime.now(); lst.append((now,price))
-    prev=lst[-2][1] if len(lst)>1 else None
-    ago30=next((p for t,p in reversed(lst) if t<=now-timedelta(minutes=30)),None)
-    msg=""
+    key = (chat_id, ticker)
+    lst = price_history.setdefault(key, [])
+    now = datetime.now()
+    lst.append((now, price))
+    prev = lst[-2][1] if len(lst) > 1 else None
+    ago30 = next((p for t, p in reversed(lst) if t <= now-timedelta(minutes=30)), None)
+    msg = ""
 
     if prev:
-        delta=(price-prev)/prev*100
-        msg+=("📈 " if delta>=0 else "📉 ")+f"{ticker}\n"
-        msg+=f"{'▲ Рост' if delta>=0 else '▼ Спад'} {abs(delta):.2f}%\nПредыдущая ({interval} мин): {prev:.2f}\n"
+        delta = (price-prev)/prev*100
+        msg += ("📈 " if delta >= 0 else "📉 ") + f"{ticker}\n"
+        msg += f"{'▲ Рост' if delta >= 0 else '▼ Спад'} {abs(delta):.2f}%\nПредыдущая ({interval} мин): {prev:.2f}\n"
     else:
-        msg+=f"{ticker}\nПредыдущая: N/A\n"
+        msg += f"{ticker}\nПредыдущая: N/A\n"
 
-    msg+=f"30 мин назад: {ago30:.2f}\n" if ago30 else "30 мин назад: N/A\n"
-    msg+=f"Текущая: {price:.2f}"
-    kb=[[InlineKeyboardButton("❌ Остановить",callback_data=f"delreg_{ticker}")]]
-    img=await capture_chart_screenshot(ticker,chat_id)
+    msg += f"30 мин назад: {ago30:.2f}\n" if ago30 else "30 мин назад: N/A\n"
+    msg += f"Текущая: {price:.2f}"
+    kb = [[InlineKeyboardButton("❌ Остановить", callback_data=f"delreg_{ticker}")]]
+    img = await capture_chart_screenshot(ticker, chat_id)
     if img:
-        await context.bot.send_photo(chat_id, img, caption=msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+        await context.bot.send_photo(
+            chat_id,
+            img,
+            caption=msg,
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode="Markdown"
+        )
     else:
-        await context.bot.send_message(chat_id, msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+        await context.bot.send_message(
+            chat_id,
+            msg,
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode="Markdown"
+        )
     log_notification(chat_id, ticker, "REGULAR", str(price))
     update_history(chat_id, ticker)
 
 async def check_price_changes(context: CallbackContext):
-    job=context.job; d=job.data
-    chat_id,ticker,thr,interval = d["chat_id"],d["ticker"],d["threshold"],d["interval"]
-    price=await get_stock_price(ticker)
+    job = context.job
+    d = job.data
+    chat_id, ticker, thr, interval = d["chat_id"], d["ticker"], d["threshold"], d["interval"]
+    price = await get_stock_price(ticker)
     if price is None: return
-    key=(chat_id,ticker)
-    lst=price_history.setdefault(key,[]); prev=lst[-1][1] if lst else None
+    key = (chat_id,ticker)
+    lst = price_history.setdefault(key,[]); prev=lst[-1][1] if lst else None
     lst.append((datetime.now(),price))
-    if prev and abs((price-prev)/prev*100)>=thr:
-        delta=(price-prev)/prev*100
-        msg=f"🚨 *{ticker}* — {'▲ Рост' if delta>=0 else '▼ Снижение'} {abs(delta):.2f}%\nПредыдущая: {prev:.2f}\nТекущая: {price:.2f}"
-        kb=[[InlineKeyboardButton("❌ Остановить",callback_data=f"delthr_{ticker}")]]
-        img=await capture_chart_screenshot(ticker,chat_id)
+    if prev and abs((price-prev)/prev*100) >= thr:
+        delta = (price-prev)/prev*100
+        msg = f"🚨 *{ticker}* — {'▲ Рост' if delta>=0 else '▼ Снижение'} {abs(delta):.2f}%\nПредыдущая: {prev:.2f}\nТекущая: {price:.2f}"
+        kb = [[InlineKeyboardButton("❌ Остановить",callback_data=f"delthr_{ticker}")]]
+        img = await capture_chart_screenshot(ticker,chat_id)
         if img:
             await context.bot.send_photo(chat_id, img, caption=msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
         else:
@@ -769,7 +953,7 @@ def setup_handlers(app):
             DEV_MENU:[
                 CallbackQueryHandler(dev_stats, pattern="^dev_stats$"),
                 CallbackQueryHandler(show_developers, pattern="^dev_list$"),
-                CallbackQueryHandler(show_unique_users, pattern="^show_unique_users$"),
+                CallbackQueryHandler(show_unique_users, pattern=r"^users_page_\-?\d+$"),
                 CallbackQueryHandler(dev_analyze, pattern="^dev_analyze$"),
                 CallbackQueryHandler(dev_menu, pattern="^dev_menu$"),
                 CallbackQueryHandler(start, pattern="^main_menu$")
@@ -793,12 +977,12 @@ def setup_handlers(app):
     app.add_handler(CallbackQueryHandler(start, pattern="^main_menu$"))
     app.add_handler(CommandHandler("reload", reload_tickers))
     app.add_handler(MessageHandler(filters.COMMAND, unknown_command))
-    # Повесим глобальные коллбэки для кнопок отмены из уведомлений (доработать, отслеживание удаляется, но много ошибок в терминале)
+    #глобальные коллбэки для кнопок отмены из уведомлений (доработать, отслеживание удаляется, но много ошибок в терминале)
     app.add_handler(CallbackQueryHandler(delete_regular_confirm, pattern="^delreg_"))
     app.add_handler(CallbackQueryHandler(delete_threshold_confirm, pattern="^delthr_"))
     #---
 
-    # Явно добавим обработчики для кнопок разработчика
+    #обработчики для кнопок разработчика
     app.add_handler(CallbackQueryHandler(dev_menu, pattern="^dev_menu$"))
     app.add_handler(CallbackQueryHandler(dev_stats, pattern="^dev_stats$"))
     app.add_handler(CallbackQueryHandler(show_developers, pattern="^dev_list$"))
@@ -809,6 +993,7 @@ def setup_handlers(app):
     app.add_handler(CallbackQueryHandler(execute_job_action, pattern=r"^(toggle|run)_"))
 
 def main():
+    load_existing_users()
     user_history.update(load_user_history()) #загружаем историю пользователей при запуске
     timeframe_settings.update(load_timeframes())  # загружаем таймфреймы пользователей
     load_tickers()
